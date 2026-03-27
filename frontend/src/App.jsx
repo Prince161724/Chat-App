@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { io } from 'socket.io-client'
 
-const WS_URL = import.meta.env.VITE_WS_URL || `${window.location.protocol}//${window.location.hostname}:3000`
+const WS_URL = import.meta.env.VITE_WS_URL || 'https://chat-app-lxk3.onrender.com/'
 const socket = io(WS_URL, {
   autoConnect: false,
   transports: ['websocket', 'polling'],

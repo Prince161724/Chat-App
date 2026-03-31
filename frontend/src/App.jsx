@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { io } from 'socket.io-client'
 
 const WS_URL = import.meta.env.VITE_WS_URL || 'https://chat-app-lxk3.onrender.com/'
+const API_URL = (import.meta.env.VITE_API_URL || WS_URL).replace(/\/+$/, '')
 const socket = io(WS_URL, {
   autoConnect: false,
   transports: ['websocket', 'polling'],
@@ -19,6 +20,8 @@ function App() {
   const [nameInput, setNameInput] = useState(() => localStorage.getItem('chatName') || '')
   const [name, setName] = useState(() => localStorage.getItem('chatName') || '')
   const nameRef = useRef(name)
+  const [aiLoading, setAiLoading] = useState(false)
+  const [aiError, setAiError] = useState('')
 
   useEffect(() => {
     function handleConnect() {
@@ -112,6 +115,11 @@ function App() {
     nameRef.current = name
   }, [name])
 
+  const lastPeerMessage = useMemo(
+    () => [...messages].reverse().find((msg) => !msg.own && !!msg.text),
+    [messages]
+  )
+
   const resolveName = (id) => {
     if (!id) return ''
     if (id === socket.id) return name || 'You'
@@ -137,6 +145,27 @@ function App() {
     localStorage.setItem('chatName', trimmed)
     socket.auth = { name: trimmed }
     socket.emit('set-name', trimmed)
+  }
+
+  async function generateAiReply() {
+    if (!lastPeerMessage?.text || aiLoading) return
+    setAiError('')
+    setAiLoading(true)
+    try {
+      const res = await fetch(`${API_URL}/ai-reply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: lastPeerMessage.text }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data?.error || `Status ${res.status}`)
+      if (!data?.reply) throw new Error('No reply returned')
+      setValue(data.reply)
+    } catch (err) {
+      setAiError(err?.message || 'Failed to generate reply')
+    } finally {
+      setAiLoading(false)
+    }
   }
 
   return (
@@ -210,6 +239,21 @@ function App() {
           ))}
         </section>
         <footer>
+          <div className="ai-row">
+            <div className="ai-text">
+              {lastPeerMessage?.text ? (
+                <>
+                  Auto-reply to last message: <strong>{lastPeerMessage.text.slice(0, 80)}{lastPeerMessage.text.length > 80 ? '…' : ''}</strong>
+                </>
+              ) : (
+                'Waiting for a message to suggest a reply'
+              )}
+            </div>
+            <button onClick={generateAiReply} disabled={!lastPeerMessage || aiLoading} className="secondary">
+              {aiLoading ? 'Thinking…' : 'Auto-generate reply'}
+            </button>
+          </div>
+          {aiError && <div className="ai-error">{aiError}</div>}
           <div className="input-row">
             <input
               value={value}

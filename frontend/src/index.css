@@ -19,6 +19,44 @@ body {
   font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
 }
 
+.ai-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  margin-bottom: 10px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ai-text {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.ai-error {
+  margin: 0 0 10px;
+  color: #fca5a5;
+  font-size: 14px;
+}
+
+button.secondary {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  box-shadow: none;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
 .page {
   min-height: 100vh;
   display: grid;

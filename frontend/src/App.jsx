@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { io } from 'socket.io-client'
+import VideoCall from './VideoCall'
 
-const WS_URL = import.meta.env.VITE_WS_URL || 'https://chat-app-lxk3.onrender.com/'
+const WS_URL = import.meta.env.VITE_WS_URL || 'http://localhost:3000'
 const API_URL = (import.meta.env.VITE_API_URL || WS_URL).replace(/\/+$/, '')
 const socket = io(WS_URL, {
   autoConnect: false,
@@ -17,44 +18,90 @@ function App() {
   const [peers, setPeers] = useState([])
   const [target, setTarget] = useState('')
   const [myId, setMyId] = useState('')
-  const [nameInput, setNameInput] = useState(() => localStorage.getItem('chatName') || '')
+  const [nameInput, setNameInput] = useState('')
+  const [numberInput, setNumberInput] = useState('')
   const [name, setName] = useState(() => localStorage.getItem('chatName') || '')
+  const [number, setNumber] = useState(() => localStorage.getItem('chatNumber') || '')
   const nameRef = useRef(name)
+  const numberRef = useRef(number)
   const [aiLoading, setAiLoading] = useState(false)
   const [aiError, setAiError] = useState('')
+  const messagesEndRef = useRef(null)
+  const videoCallRef = useRef(null)
+
+  // Get selected peer's number
+  const targetPeerNumber = useMemo(() => {
+    const p = peers.find((p) => p.id === target)
+    return p?.number || ''
+  }, [peers, target])
+
+  // Filter messages for current conversation only
+  const filteredMessages = useMemo(() => {
+    if (!targetPeerNumber) return []
+    return messages.filter((msg) => {
+      if (msg.system) return false
+      // Own messages sent TO this peer
+      if (msg.own && msg.toNumber === targetPeerNumber) return true
+      // Messages received FROM this peer
+      if (!msg.own && msg.fromNumber === targetPeerNumber) return true
+      return false
+    })
+  }, [messages, targetPeerNumber])
+
+  // Auto-scroll to bottom when filtered messages change
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [filteredMessages])
 
   useEffect(() => {
     function handleConnect() {
       setStatus('connected')
       setMyId(socket.id)
-      setMessages((prev) => [...prev, { from: 'system', text: `Connected as ${nameRef.current || socket.id}` }])
     }
 
     function handleDisconnect(reason) {
       setStatus('disconnected')
-      setMessages((prev) => [...prev, { from: 'system', text: `Disconnected: ${reason}` }])
+      setMessages((prev) => [...prev, { system: true, text: `Disconnected: ${reason}` }])
     }
 
     function handleMessage(payload) {
       const text = payload?.text || JSON.stringify(payload)
-      const fromId = payload?.from
-      const toId = payload?.to
-      const fromName =
-        payload?.fromName || (fromId === socket.id ? nameRef.current || 'You' : fromId) || 'peer'
-      const toName = payload?.toName || toId || ''
       setMessages((prev) => [
         ...prev,
-        { from: fromName, fromId, to: toId, toName, text, own: fromId === socket.id },
+        {
+          fromName: payload?.fromName || 'Unknown',
+          fromNumber: payload?.fromNumber || '',
+          toName: payload?.toName || '',
+          toNumber: payload?.toNumber || '',
+          text,
+          own: false, // Messages from server are always from others
+          timestamp: payload?.timestamp || new Date().toISOString(),
+        },
       ])
+    }
+
+    function handleChatHistory(history = []) {
+      if (!Array.isArray(history) || history.length === 0) return
+      const mapped = history.map((msg) => ({
+        fromName: msg.fromName,
+        fromNumber: msg.fromNumber,
+        toName: msg.toName,
+        toNumber: msg.toNumber,
+        text: msg.text,
+        own: msg.own,
+        timestamp: msg.timestamp,
+        isHistory: true,
+      }))
+      setMessages(mapped)
     }
 
     function handleOnline(list = []) {
       const peersOnly = list.filter((item) => item.id !== socket.id)
       setPeers(peersOnly)
-      const hasTarget = peersOnly.some((p) => p.id === target)
-      if (!hasTarget) {
-        setTarget(peersOnly[0]?.id || '')
-      }
+      setTarget((prev) => {
+        const stillExists = peersOnly.some((p) => p.id === prev)
+        return stillExists ? prev : (peersOnly[0]?.id || '')
+      })
     }
 
     function handleWelcome(payload = {}) {
@@ -62,29 +109,27 @@ function App() {
       if (Array.isArray(payload.online)) {
         const peersOnly = payload.online.filter((item) => item.id !== socket.id)
         setPeers(peersOnly)
-        const hasTarget = peersOnly.some((p) => p.id === target)
-        if (!hasTarget) {
-          setTarget(peersOnly[0]?.id || '')
-        }
+        setTarget((prev) => {
+          const stillExists = peersOnly.some((p) => p.id === prev)
+          return stillExists ? prev : (peersOnly[0]?.id || '')
+        })
       }
     }
 
     function handleConnectError(err) {
       console.error('Socket connect error', err?.message)
       setStatus('error')
-      setMessages((prev) => [...prev, { from: 'system', text: `Connect error: ${err?.message || 'unknown'}` }])
+      setMessages((prev) => [...prev, { system: true, text: `Connect error: ${err?.message || 'unknown'}` }])
     }
 
     function handleReconnectAttempt(attempt) {
       setStatus('connecting')
-      if (attempt > 1) {
-        setMessages((prev) => [...prev, { from: 'system', text: `Reconnecting... (attempt ${attempt})` }])
-      }
     }
 
     socket.on('connect', handleConnect)
     socket.on('disconnect', handleDisconnect)
     socket.on('message', handleMessage)
+    socket.on('chat-history', handleChatHistory)
     socket.on('online', handleOnline)
     socket.on('welcome', handleWelcome)
     socket.on('connect_error', handleConnectError)
@@ -94,6 +139,7 @@ function App() {
       socket.off('connect', handleConnect)
       socket.off('disconnect', handleDisconnect)
       socket.off('message', handleMessage)
+      socket.off('chat-history', handleChatHistory)
       socket.off('online', handleOnline)
       socket.off('welcome', handleWelcome)
       socket.off('connect_error', handleConnectError)
@@ -102,49 +148,71 @@ function App() {
     }
   }, [])
 
+  // Connect socket when name & number are set
   useEffect(() => {
-    if (!name) return
-    socket.auth = { name }
+    if (!name || !number) return
+    socket.auth = { name, number }
     if (!socket.connected) {
       setStatus('connecting')
       socket.connect()
     }
-  }, [name])
+  }, [name, number])
 
   useEffect(() => {
     nameRef.current = name
-  }, [name])
+    numberRef.current = number
+  }, [name, number])
 
   const lastPeerMessage = useMemo(
-    () => [...messages].reverse().find((msg) => !msg.own && !!msg.text),
+    () => [...messages].reverse().find((msg) => !msg.own && !msg.system && !!msg.text),
     [messages]
   )
-
-  const resolveName = (id) => {
-    if (!id) return ''
-    if (id === socket.id) return name || 'You'
-    return peers.find((p) => p.id === id)?.name || id
-  }
 
   function sendMessage() {
     const trimmed = value.trim()
     if (!trimmed || !target) return
+    const targetPeer = peers.find((p) => p.id === target)
     socket.emit('direct-message', { to: target, text: trimmed })
+    // Add locally (server does NOT echo back to sender)
     setMessages((prev) => [
       ...prev,
-      { from: resolveName(socket.id), fromId: socket.id, to: target, toName: resolveName(target), text: trimmed, own: true },
+      {
+        fromName: name,
+        fromNumber: number,
+        toName: targetPeer?.name || '',
+        toNumber: targetPeer?.number || '',
+        text: trimmed,
+        own: true,
+        timestamp: new Date().toISOString(),
+      },
     ])
     setValue('')
   }
 
   function handleNameSubmit(e) {
     e.preventDefault()
-    const trimmed = nameInput.trim()
-    if (!trimmed) return
-    setName(trimmed)
-    localStorage.setItem('chatName', trimmed)
-    socket.auth = { name: trimmed }
-    socket.emit('set-name', trimmed)
+    const trimmedName = nameInput.trim()
+    const trimmedNumber = numberInput.trim()
+    if (!trimmedName || !trimmedNumber) return
+    setName(trimmedName)
+    setNumber(trimmedNumber)
+    localStorage.setItem('chatName', trimmedName)
+    localStorage.setItem('chatNumber', trimmedNumber)
+  }
+
+  function handleLogout() {
+    socket.disconnect()
+    localStorage.removeItem('chatName')
+    localStorage.removeItem('chatNumber')
+    setName('')
+    setNumber('')
+    setNameInput('')
+    setNumberInput('')
+    setMessages([])
+    setPeers([])
+    setTarget('')
+    setMyId('')
+    setStatus('connecting')
   }
 
   async function generateAiReply() {
@@ -168,109 +236,180 @@ function App() {
     }
   }
 
-  return (
-    <div className="page">
-      <div className="frame">
-        <header>
-          <div className="title">Class Chat</div>
-          <div className={`status ${status === 'connected' ? 'connected' : ''}`}>
-            <span className="status-dot" />
-            <span className="status-label">
-              {status === 'connected'
-                ? 'Connected'
-                : status === 'disconnected'
-                ? 'Disconnected'
-                : status === 'error'
-                ? 'Error'
-                : 'Connecting…'}
-            </span>
-          </div>
-        </header>
-        {!name && (
-          <section className="panel name-panel">
-            <form className="name-form" onSubmit={handleNameSubmit}>
-              <label>Set your display name</label>
-              <div className="input-row">
-                <input
-                  value={nameInput}
-                  onChange={(e) => setNameInput(e.target.value)}
-                  placeholder="e.g. Alex, Ms. Lee"
-                  autoFocus
-                />
-                <button type="submit">Join</button>
-              </div>
-            </form>
-          </section>
-        )}
-        <section className="panel">
-          <div className="id-row">
-            <span className="label">Your Name</span>
-            <span className="id-chip">{name || 'Set a name to join'}</span>
-          </div>
-          <div className="id-row">
-            <span className="label">Your ID</span>
-            <span className="id-chip">{myId || '—'}</span>
-          </div>
-          <div className="id-row">
-            <span className="label">Send to</span>
-            <select value={target} onChange={(e) => setTarget(e.target.value)}>
-              {peers.length === 0 && <option value="">No peers online</option>}
-              {peers.map((peer) => (
-                <option key={peer.id} value={peer.id}>
-                  {peer.name} ({peer.id.slice(-4)})
-                </option>
-              ))}
-            </select>
-          </div>
-        </section>
-        <section className="messages">
-          {messages.map((msg, idx) => (
-            <article key={idx} className={`bubble ${msg.own ? 'own' : ''}`}>
-              <div className="meta">
-                <span>
-                  {msg.to
-                    ? `${msg.from || resolveName(msg.fromId)} → ${msg.toName || resolveName(msg.to)}`
-                    : msg.from || resolveName(msg.fromId)}
-                </span>
-                <span>{new Date().toLocaleTimeString()}</span>
-              </div>
-              <div className="text">{msg.text}</div>
-            </article>
-          ))}
-        </section>
-        <footer>
-          <div className="ai-row">
-            <div className="ai-text">
-              {lastPeerMessage?.text ? (
-                <>
-                  Auto-reply to last message: <strong>{lastPeerMessage.text.slice(0, 80)}{lastPeerMessage.text.length > 80 ? '…' : ''}</strong>
-                </>
-              ) : (
-                'Waiting for a message to suggest a reply'
-              )}
+  function formatTime(ts) {
+    if (!ts) return ''
+    try {
+      return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    } catch {
+      return ''
+    }
+  }
+
+  // ---------- LOGIN SCREEN ----------
+  if (!name || !number) {
+    return (
+      <div className="login-page">
+        <div className="login-card">
+          <div className="login-icon">💬</div>
+          <h1 className="login-title">Class Chat</h1>
+          <p className="login-subtitle">Enter your name and unique number to join</p>
+          <form onSubmit={handleNameSubmit} className="login-form">
+            <div className="login-field">
+              <label htmlFor="login-name">Display Name</label>
+              <input
+                id="login-name"
+                value={nameInput}
+                onChange={(e) => setNameInput(e.target.value)}
+                placeholder="e.g. Alex, Prince"
+                autoFocus
+              />
             </div>
-            <button onClick={generateAiReply} disabled={!lastPeerMessage || aiLoading} className="secondary">
-              {aiLoading ? 'Thinking…' : 'Auto-generate reply'}
+            <div className="login-field">
+              <label htmlFor="login-number">Your Unique Number</label>
+              <input
+                id="login-number"
+                value={numberInput}
+                onChange={(e) => setNumberInput(e.target.value)}
+                placeholder="e.g. 9876543210"
+              />
+            </div>
+            <button type="submit" className="login-btn">
+              Join Chat →
             </button>
-          </div>
-          {aiError && <div className="ai-error">{aiError}</div>}
-          <div className="input-row">
-            <input
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault()
-                  sendMessage()
-                }
-              }}
-              placeholder="Send a quick note"
-              autoComplete="off"
-            />
-            <button onClick={sendMessage}>Send</button>
-          </div>
-        </footer>
+          </form>
+        </div>
       </div>
+    )
+  }
+
+  // ---------- CHAT SCREEN ----------
+  return (
+    <div className="chat-layout">
+      {/* Sidebar */}
+      <aside className="sidebar">
+        <div className="sidebar-header">
+          <div className="sidebar-title">💬 Class Chat</div>
+          <button className="logout-btn" onClick={handleLogout} title="Logout">⏻</button>
+        </div>
+
+        <div className="profile-card">
+          <div className="avatar">{name.charAt(0).toUpperCase()}</div>
+          <div className="profile-info">
+            <div className="profile-name">{name}</div>
+            <div className="profile-number">#{number}</div>
+          </div>
+          <span className={`connection-dot ${status}`} title={status} />
+        </div>
+
+        <div className="peers-section">
+          <div className="peers-label">Online — {peers.length}</div>
+          {peers.length === 0 && <div className="no-peers">No one else is online</div>}
+          {peers.map((peer) => (
+            <div
+              key={peer.id}
+              className={`peer-item ${target === peer.id ? 'active' : ''}`}
+              onClick={() => setTarget(peer.id)}
+            >
+              <div className="peer-avatar">{(peer.name || '?').charAt(0).toUpperCase()}</div>
+              <div className="peer-info">
+                <div className="peer-name">{peer.name}</div>
+                <div className="peer-number">#{peer.number || peer.id.slice(-4)}</div>
+              </div>
+              <span className="peer-online-dot" />
+            </div>
+          ))}
+        </div>
+
+        {/* AI section */}
+        <div className="ai-section">
+          <button onClick={generateAiReply} disabled={!lastPeerMessage || aiLoading} className="ai-btn">
+            {aiLoading ? '⏳ Thinking…' : '🤖 AI Reply'}
+          </button>
+          {aiError && <div className="ai-error">{aiError}</div>}
+        </div>
+      </aside>
+
+      {/* Main Chat Area */}
+      <main className="chat-main">
+        <div className="chat-header">
+          {target ? (
+            <>
+              <div className="chat-header-avatar">
+                {(peers.find((p) => p.id === target)?.name || '?').charAt(0).toUpperCase()}
+              </div>
+              <div className="chat-header-info">
+                <div className="chat-header-name">
+                  {peers.find((p) => p.id === target)?.name || 'Unknown'}
+                </div>
+                <div className="chat-header-number">
+                  #{peers.find((p) => p.id === target)?.number || ''}
+                </div>
+              </div>
+              <button
+                className="vc-call-btn"
+                onClick={() => videoCallRef.current?.startCall(target)}
+                title="Start video call"
+              >
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+                  <path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/>
+                </svg>
+              </button>
+            </>
+          ) : (
+            <div className="chat-header-name">Select a peer to chat</div>
+          )}
+        </div>
+
+        <section className="messages-area">
+          {filteredMessages.length === 0 && (
+            <div className="empty-chat">
+              <div className="empty-icon">💬</div>
+              <p>{target ? 'No messages yet. Say hello!' : 'Select a peer to start chatting'}</p>
+            </div>
+          )}
+          {filteredMessages.map((msg, idx) => (
+            <div key={idx} className={`msg-row ${msg.own ? 'own' : 'other'}`}>
+              <div className={`msg-bubble ${msg.own ? 'own' : 'other'}`}>
+                <div className="msg-sender">
+                  {msg.own ? 'You' : msg.fromName || 'Unknown'}
+                  {msg.isHistory && <span className="history-badge">history</span>}
+                </div>
+                <div className="msg-text">{msg.text}</div>
+                <div className="msg-time">{formatTime(msg.timestamp)}</div>
+              </div>
+            </div>
+          ))}
+          <div ref={messagesEndRef} />
+        </section>
+
+        <footer className="chat-footer">
+          <input
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                sendMessage()
+              }
+            }}
+            placeholder={target ? 'Type a message…' : 'Select a peer first'}
+            autoComplete="off"
+            disabled={!target}
+          />
+          <button onClick={sendMessage} disabled={!target || !value.trim()} className="send-btn">
+            Send
+          </button>
+        </footer>
+      </main>
+
+      {/* Video Call Component */}
+      <VideoCall
+        ref={videoCallRef}
+        socket={socket}
+        myId={myId}
+        peers={peers}
+        target={target}
+      />
     </div>
   )
 }

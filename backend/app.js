@@ -4,8 +4,9 @@ import cors from 'cors'
 import OpenAI from 'openai'
 import dotenv from 'dotenv'
 import connectServer from './Socket.js'
+import connectDB from './db.js'
 
-dotenv.config()
+dotenv.config();
 
 const app = express()
 const server = http.createServer(app)
@@ -19,7 +20,8 @@ app.use(express.json({ limit: '1mb' }))
 const openaiApiKey = process.env.OPENAI_API_KEY || process.env.OPENAI_KEY
 const openaiClient = openaiApiKey ? new OpenAI({ apiKey: openaiApiKey }) : null
 
-await connectServer(server)
+await connectDB();
+await connectServer(server);
 
 app.get('/', (req, res) => {
     res.send('OK')

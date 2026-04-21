@@ -11,10 +11,7 @@ dotenv.config();
 const app = express()
 const server = http.createServer(app)
 
-const allowedOrigin = process.env.ALLOWED_ORIGIN || process.env.FRONTEND_ORIGIN || '*'
-const corsOrigins = allowedOrigin === '*' ? '*' : allowedOrigin.split(',').map((o) => o.trim())
-
-app.use(cors({ origin: corsOrigins, credentials: true }))
+app.use(cors({ origin: '*' }))
 app.use(express.json({ limit: '1mb' }))
 
 const openaiApiKey = process.env.OPENAI_API_KEY || process.env.OPENAI_KEY

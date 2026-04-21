@@ -2,14 +2,10 @@ import { Server } from 'socket.io'
 import Chat from './models/Chat.js'
 
 async function connectServer(server) {
-    const allowedOrigin = process.env.ALLOWED_ORIGIN || process.env.FRONTEND_ORIGIN || '*'
-    const corsOrigins = allowedOrigin === '*' ? '*' : allowedOrigin.split(',').map((o) => o.trim())
-
     const io = new Server(server, {
         cors: {
-            origin: corsOrigins,
+            origin: '*',
             methods: ['GET', 'POST'],
-            credentials: true,
         },
     })
 

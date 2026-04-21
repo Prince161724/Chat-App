@@ -28,6 +28,9 @@ const ICE_SERVERS = {
       credential: 'xlBmrGFJSvlagjNe',
     },
   ],
+  // Explicit unified-plan ensures consistent SDP negotiation across all browsers
+  sdpSemantics: 'unified-plan',
+  bundlePolicy: 'max-bundle',
 }
 
 // Call states: idle | calling | ringing | connected
@@ -47,6 +50,15 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
   const durationInterval = useRef(null)
   const iceCandidateQueue = useRef([]) // Queue for ICE candidates that arrive early
   const remoteDescriptionSet = useRef(false) // Track if remote description is set
+
+  // FIX 1: Use a ref for callState so socket handlers always read the latest value
+  // without needing callState in the socket effect dependency array.
+  // This prevents ICE candidates from being lost when callState transitions
+  // (e.g. 'calling' → 'connected') cause the socket effect to teardown and re-register.
+  const callStateRef = useRef('idle')
+  useEffect(() => {
+    callStateRef.current = callState
+  }, [callState])
 
   // Cleanup helper
   const cleanup = useCallback(() => {
@@ -110,14 +122,34 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
       }
     }
 
+    // FIX 2: Robust ontrack handler.
+    // - Some browsers fire ontrack with event.streams[0] undefined — use event.track fallback.
+    // - FIX 3: Explicitly call .play() after assigning srcObject to defeat autoplay policy
+    //   on HTTPS-deployed pages (Vercel, Render, etc.) which block unmuted autoplay.
     pc.ontrack = (event) => {
-      console.log('🎥 ontrack fired, streams:', event.streams.length)
-      if (event.streams[0]) {
+      console.log('🎥 ontrack fired, streams:', event.streams?.length, 'track:', event.track?.kind)
+
+      // Build the remote stream, using event.streams[0] when available and
+      // falling back to manually adding the track to a new MediaStream.
+      if (event.streams && event.streams[0]) {
         remoteStream.current = event.streams[0]
-        // Apply to video element if it exists right now
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = event.streams[0]
+      } else {
+        // Fallback path: create/reuse a MediaStream and add the incoming track
+        if (!remoteStream.current) {
+          remoteStream.current = new MediaStream()
         }
+        if (event.track) {
+          remoteStream.current.addTrack(event.track)
+        }
+      }
+
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = remoteStream.current
+        // Explicitly start playback — autoplay for unmuted video is blocked by browsers
+        // unless .play() is called after a user gesture or programmatically like this.
+        remoteVideoRef.current.play().catch((err) => {
+          console.warn('Remote video autoplay blocked:', err)
+        })
       }
     }
 
@@ -146,6 +178,7 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
       localStream.current = stream
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream
+        localVideoRef.current.play().catch(() => {})
       }
       return stream
     } catch (err) {
@@ -159,6 +192,7 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
         localStream.current = stream
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream
+          localVideoRef.current.play().catch(() => {})
         }
         setCamOn(false)
         return stream
@@ -295,11 +329,16 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
   }
 
   // === SOCKET EVENT LISTENERS ===
+  // FIX 1 (continued): callState is intentionally NOT in the dependency array here.
+  // All handlers that previously read callState now use callStateRef.current instead.
+  // This keeps the socket listeners stable for the entire lifetime of the socket
+  // connection, preventing ICE candidates from being dropped during the brief
+  // teardown/re-registration that happened on every callState transition.
   useEffect(() => {
     if (!socket) return
 
     function handleIncomingCall(data) {
-      if (callState !== 'idle') {
+      if (callStateRef.current !== 'idle') {
         // Already in a call, auto-reject
         socket.emit('call-rejected', { to: data.from })
         return
@@ -312,7 +351,7 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
     }
 
     function handleCallAccepted(data) {
-      if (!peerConnection.current || callState !== 'calling') return
+      if (!peerConnection.current || callStateRef.current !== 'calling') return
 
       console.log('✅ Call accepted, setting remote description')
       peerConnection.current
@@ -368,7 +407,7 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
       socket.off('ice-candidate', handleIceCandidate)
       socket.off('call-ended', handleCallEnded)
     }
-  }, [socket, callState, cleanup, startTimer, processIceQueue])
+  }, [socket, cleanup, startTimer, processIceQueue])
 
   // Get caller/target name for display
   const getPeerName = (peerId) => {
@@ -435,9 +474,13 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
         <video
           ref={(el) => {
             remoteVideoRef.current = el
-            // Re-apply remote stream when this element mounts
+            // Re-apply remote stream when this element mounts (e.g. after a re-render)
+            // and explicitly call play() to defeat autoplay policy on HTTPS pages.
             if (el && remoteStream.current) {
               el.srcObject = remoteStream.current
+              el.play().catch((err) => {
+                console.warn('Remote video play() blocked:', err)
+              })
             }
           }}
           autoPlay
@@ -452,6 +495,7 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
             // Re-apply local stream when this element mounts
             if (el && localStream.current) {
               el.srcObject = localStream.current
+              el.play().catch(() => {})
             }
           }}
           autoPlay

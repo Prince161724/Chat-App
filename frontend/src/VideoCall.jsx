@@ -8,19 +8,24 @@ const ICE_SERVERS = {
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' },
     {
-      urls: 'turn:openrelay.metered.ca:80',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
+      urls: 'turn:global.relay.metered.ca:80',
+      username: 'b79c6c68a1b3c3e9bdb6e910',
+      credential: 'xlBmrGFJSvlagjNe',
     },
     {
-      urls: 'turn:openrelay.metered.ca:443',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
+      urls: 'turn:global.relay.metered.ca:80?transport=tcp',
+      username: 'b79c6c68a1b3c3e9bdb6e910',
+      credential: 'xlBmrGFJSvlagjNe',
     },
     {
-      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
+      urls: 'turn:global.relay.metered.ca:443',
+      username: 'b79c6c68a1b3c3e9bdb6e910',
+      credential: 'xlBmrGFJSvlagjNe',
+    },
+    {
+      urls: 'turns:global.relay.metered.ca:443?transport=tcp',
+      username: 'b79c6c68a1b3c3e9bdb6e910',
+      credential: 'xlBmrGFJSvlagjNe',
     },
   ],
 }
@@ -40,6 +45,8 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
   const remoteVideoRef = useRef(null)
   const callTargetRef = useRef(null) // who we're in call with
   const durationInterval = useRef(null)
+  const iceCandidateQueue = useRef([]) // Queue for ICE candidates that arrive early
+  const remoteDescriptionSet = useRef(false) // Track if remote description is set
 
   // Cleanup helper
   const cleanup = useCallback(() => {
@@ -51,6 +58,7 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
       peerConnection.current.onicecandidate = null
       peerConnection.current.ontrack = null
       peerConnection.current.onconnectionstatechange = null
+      peerConnection.current.oniceconnectionstatechange = null
       peerConnection.current.close()
       peerConnection.current = null
     }
@@ -64,11 +72,28 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
     if (localVideoRef.current) localVideoRef.current.srcObject = null
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null
     callTargetRef.current = null
+    iceCandidateQueue.current = []
+    remoteDescriptionSet.current = false
     setCallDuration(0)
     setCallerInfo(null)
     setMicOn(true)
     setCamOn(true)
     setCallState('idle')
+  }, [])
+
+  // Process any queued ICE candidates
+  const processIceQueue = useCallback(async () => {
+    if (!peerConnection.current) return
+    const queue = [...iceCandidateQueue.current]
+    iceCandidateQueue.current = []
+    console.log(`📨 Processing ${queue.length} queued ICE candidates`)
+    for (const candidate of queue) {
+      try {
+        await peerConnection.current.addIceCandidate(new RTCIceCandidate(candidate))
+      } catch (err) {
+        console.error('Error adding queued ICE candidate:', err)
+      }
+    }
   }, [])
 
   // Create RTCPeerConnection with handlers
@@ -77,6 +102,7 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
 
     pc.onicecandidate = (event) => {
       if (event.candidate && callTargetRef.current) {
+        console.log('🧊 Sending ICE candidate:', event.candidate.type, event.candidate.protocol)
         socket.emit('ice-candidate', {
           to: callTargetRef.current,
           candidate: event.candidate,
@@ -95,7 +121,12 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
       }
     }
 
+    pc.oniceconnectionstatechange = () => {
+      console.log('🧊 ICE connection state:', pc.iceConnectionState)
+    }
+
     pc.onconnectionstatechange = () => {
+      console.log('🔗 Connection state:', pc.connectionState)
       if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
         hangUp()
       }
@@ -153,6 +184,8 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
 
     callTargetRef.current = targetId
     setCallState('calling')
+    iceCandidateQueue.current = []
+    remoteDescriptionSet.current = false
 
     const stream = await getMedia()
     if (!stream) {
@@ -199,6 +232,11 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
 
     try {
       await pc.setRemoteDescription(new RTCSessionDescription(callerInfo.offer))
+      remoteDescriptionSet.current = true
+
+      // Process any ICE candidates that arrived while we were setting up
+      await processIceQueue()
+
       const answer = await pc.createAnswer()
       await pc.setLocalDescription(answer)
 
@@ -210,7 +248,7 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
       console.error('Error accepting call:', err)
       cleanup()
     }
-  }, [callerInfo, socket, getMedia, createPeerConnection, cleanup, startTimer])
+  }, [callerInfo, socket, getMedia, createPeerConnection, cleanup, startTimer, processIceQueue])
 
   // === REJECT INCOMING CALL ===
   const rejectCall = useCallback(() => {
@@ -266,6 +304,9 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
         socket.emit('call-rejected', { to: data.from })
         return
       }
+      console.log('📞 Incoming call from', data.fromName)
+      iceCandidateQueue.current = []
+      remoteDescriptionSet.current = false
       setCallerInfo(data)
       setCallState('ringing')
     }
@@ -273,9 +314,13 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
     function handleCallAccepted(data) {
       if (!peerConnection.current || callState !== 'calling') return
 
+      console.log('✅ Call accepted, setting remote description')
       peerConnection.current
         .setRemoteDescription(new RTCSessionDescription(data.answer))
-        .then(() => {
+        .then(async () => {
+          remoteDescriptionSet.current = true
+          // Process any ICE candidates that arrived before remote description was set
+          await processIceQueue()
           setCallState('connected')
           startTimer()
         })
@@ -290,11 +335,20 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
     }
 
     function handleIceCandidate(data) {
-      if (peerConnection.current && data.candidate) {
-        peerConnection.current
-          .addIceCandidate(new RTCIceCandidate(data.candidate))
-          .catch((err) => console.error('Error adding ICE candidate:', err))
+      if (!data.candidate) return
+
+      // If peer connection doesn't exist or remote description isn't set yet, queue it
+      if (!peerConnection.current || !remoteDescriptionSet.current) {
+        console.log('📥 Queuing ICE candidate (remote desc not set yet)')
+        iceCandidateQueue.current.push(data.candidate)
+        return
       }
+
+      // Otherwise add immediately
+      console.log('📥 Adding ICE candidate directly')
+      peerConnection.current
+        .addIceCandidate(new RTCIceCandidate(data.candidate))
+        .catch((err) => console.error('Error adding ICE candidate:', err))
     }
 
     function handleCallEnded() {
@@ -314,7 +368,7 @@ const VideoCall = forwardRef(function VideoCall({ socket, myId, peers, target },
       socket.off('ice-candidate', handleIceCandidate)
       socket.off('call-ended', handleCallEnded)
     }
-  }, [socket, callState, cleanup, startTimer])
+  }, [socket, callState, cleanup, startTimer, processIceQueue])
 
   // Get caller/target name for display
   const getPeerName = (peerId) => {
